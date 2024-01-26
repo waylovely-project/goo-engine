@@ -491,15 +491,6 @@ static void version_movieclips_legacy_camera_object(Main *bmain)
   }
 }
 
-static void version_geometry_nodes_add_realize_instance_nodes(bNodeTree *ntree)
-{
-  LISTBASE_FOREACH_MUTABLE (bNode *, node, &ntree->nodes) {
-    if (STREQ(node->idname, "GeometryNodeMeshBoolean")) {
-      add_realize_instances_before_socket(ntree, node, nodeFindSocket(node, SOCK_IN, "Mesh 2"));
-    }
-  }
-}
-
 /* Version VertexWeightEdit modifier to make existing weights exclusive of the threshold. */
 static void version_vertex_weight_edit_preserve_threshold_exclusivity(Main *bmain)
 {
@@ -1201,14 +1192,6 @@ void blo_do_versions_400(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
-  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 400, 3)) {
-    LISTBASE_FOREACH (bNodeTree *, ntree, &bmain->nodetrees) {
-      if (ntree->type == NTREE_GEOMETRY) {
-        version_geometry_nodes_add_realize_instance_nodes(ntree);
-      }
-    }
-  }
-
   /* 400 4 did not require any do_version here. */
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 400, 5)) {
@@ -1796,10 +1779,12 @@ void blo_do_versions_400(FileData *fd, Library * /*lib*/, Main *bmain)
       const int curvetype = BKE_curve_type_get(curve);
       if (curvetype == OB_FONT) {
         CharInfo *info = curve->strinfo;
-        for (int i = curve->len_char32 - 1; i >= 0; i--, info++) {
-          if (info->mat_nr > 0) {
-            /** CharInfo mat_nr used to start at 1, unlike mesh & nurbs, now zero-based. */
-            info->mat_nr--;
+        if (info != nullptr) {
+          for (int i = curve->len_char32 - 1; i >= 0; i--, info++) {
+            if (info->mat_nr > 0) {
+              /** CharInfo mat_nr used to start at 1, unlike mesh & nurbs, now zero-based. */
+              info->mat_nr--;
+            }
           }
         }
       }
@@ -1813,25 +1798,28 @@ void blo_do_versions_400(FileData *fd, Library * /*lib*/, Main *bmain)
     }
   }
 
-  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 401, 1)) {
-    LISTBASE_FOREACH (GreasePencil *, grease_pencil, &bmain->grease_pencils) {
-      versioning_grease_pencil_stroke_radii_scaling(grease_pencil);
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 400, 36)) {
+    LISTBASE_FOREACH (bScreen *, screen, &bmain->screens) {
+      LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
+        LISTBASE_FOREACH (SpaceLink *, sl, &area->spacedata) {
+          const ListBase *regionbase = (sl == area->spacedata.first) ? &area->regionbase :
+                                                                       &sl->regionbase;
+          LISTBASE_FOREACH (ARegion *, region, regionbase) {
+            if (region->regiontype != RGN_TYPE_ASSET_SHELF_HEADER) {
+              continue;
+            }
+            region->alignment &= ~RGN_SPLIT_PREV;
+            region->alignment |= RGN_ALIGN_HIDE_WITH_PREV;
+          }
+        }
+      }
     }
   }
 
-  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 401, 5)) {
-    /* Unify Material::blend_shadow and Cycles.use_transparent_shadows into the
-     * Material::blend_flag. */
-    Scene *scene = static_cast<Scene *>(bmain->scenes.first);
-    bool is_cycles = scene && STREQ(scene->r.engine, RE_engine_id_CYCLES);
-    if (is_cycles) {
-      LISTBASE_FOREACH (Material *, material, &bmain->materials) {
-        bool transparent_shadows = true;
-        if (IDProperty *cmat = version_cycles_properties_from_ID(&material->id)) {
-          transparent_shadows = version_cycles_property_boolean(
-              cmat, "use_transparent_shadow", true);
-        }
-        SET_FLAG_FROM_TEST(material->blend_flag, transparent_shadows, MA_BL_TRANSPARENT_SHADOW);
+  if (MAIN_VERSION_FILE_ATLEAST(bmain, 401, 4)) {
+    FOREACH_NODETREE_BEGIN (bmain, ntree, id) {
+      if (ntree->type != NTREE_CUSTOM) {
+        versioning_convert_combined_noise_texture_node(ntree);
       }
     }
     else {
@@ -1854,51 +1842,5 @@ void blo_do_versions_400(FileData *fd, Library * /*lib*/, Main *bmain)
    */
   {
     /* Keep this block, even when empty. */
-
-    if (!DNA_struct_member_exists(fd->filesdna, "SceneEEVEE", "int", "volumetric_ray_depth")) {
-      SceneEEVEE default_eevee = *DNA_struct_default_get(SceneEEVEE);
-      LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
-        scene->eevee.volumetric_ray_depth = default_eevee.volumetric_ray_depth;
-      }
-    }
-
-    if (!DNA_struct_member_exists(fd->filesdna, "Material", "char", "surface_render_method")) {
-      LISTBASE_FOREACH (Material *, mat, &bmain->materials) {
-        mat->surface_render_method = (mat->blend_method == MA_BM_BLEND) ?
-                                         MA_SURFACE_METHOD_FORWARD :
-                                         MA_SURFACE_METHOD_DEFERRED;
-      }
-    }
-
-    LISTBASE_FOREACH (bScreen *, screen, &bmain->screens) {
-      LISTBASE_FOREACH (ScrArea *, area, &screen->areabase) {
-        LISTBASE_FOREACH (SpaceLink *, sl, &area->spacedata) {
-          const ListBase *regionbase = (sl == area->spacedata.first) ? &area->regionbase :
-                                                                       &sl->regionbase;
-          LISTBASE_FOREACH (ARegion *, region, regionbase) {
-            if (region->regiontype != RGN_TYPE_ASSET_SHELF_HEADER) {
-              continue;
-            }
-            region->alignment &= ~RGN_SPLIT_PREV;
-            region->alignment |= RGN_ALIGN_HIDE_WITH_PREV;
-          }
-        }
-      }
-    }
-
-    if (!DNA_struct_member_exists(fd->filesdna, "SceneEEVEE", "float", "gtao_thickness")) {
-      SceneEEVEE default_eevee = *DNA_struct_default_get(SceneEEVEE);
-      LISTBASE_FOREACH (Scene *, scene, &bmain->scenes) {
-        scene->eevee.gtao_thickness = default_eevee.gtao_thickness;
-        scene->eevee.gtao_focus = default_eevee.gtao_focus;
-      }
-    }
-
-    if (!DNA_struct_member_exists(fd->filesdna, "LightProbe", "float", "data_display_size")) {
-      LightProbe default_probe = *DNA_struct_default_get(LightProbe);
-      LISTBASE_FOREACH (LightProbe *, probe, &bmain->lightprobes) {
-        probe->data_display_size = default_probe.data_display_size;
-      }
-    }
   }
 }

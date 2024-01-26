@@ -77,12 +77,11 @@
 #define SEQ_SCROLLER_TEXT_OFFSET 8
 #define MUTE_ALPHA 120
 
-static Sequence *special_seq_update = nullptr;
-
-struct StripDrawContext {
+typedef struct StripDrawContext {
   Sequence *seq;
-  float content_start, content_end, bottom, top; /* Strip boundary in timeline space. */
-  float left_handle, right_handle;               /* Position in frames. */
+  /* Strip boundary in timeline space. Content start/end is clamped by left/right handle. */
+  float content_start, content_end, bottom, top;
+  float left_handle, right_handle; /* Position in frames. */
   float strip_content_top; /* Position in timeline space without content and text overlay. */
   float handle_width;      /* Width of strip handle in frames. */
   float strip_length;
@@ -1098,7 +1097,7 @@ static void draw_strip_offsets(TimelineDrawContext *timeline_ctx, StripDrawConte
     return;
   }
   if ((timeline_ctx->sseq->timeline_overlay.flag & SEQ_TIMELINE_SHOW_STRIP_OFFSETS) == 0 &&
-      (strip_ctx->seq != special_seq_update))
+      (strip_ctx->seq != ED_sequencer_special_preview_get()))
   {
     return;
   }
@@ -1118,10 +1117,13 @@ static void draw_strip_offsets(TimelineDrawContext *timeline_ctx, StripDrawConte
   col[3] = SEQ_render_is_muted(channels, seq) ? MUTE_ALPHA : 200;
   UI_GetColorPtrShade3ubv(col, blend_col, 10);
 
-  if (strip_ctx->left_handle > strip_ctx->content_start) {
+  const int strip_start = SEQ_time_start_frame_get(seq);
+  const int strip_end = SEQ_time_content_end_frame_get(scene, seq);
+
+  if (strip_ctx->left_handle > strip_start) {
     immUniformColor4ubv(col);
     immRectf(pos,
-             strip_ctx->content_start,
+             strip_start,
              strip_ctx->bottom - timeline_ctx->pixely,
              strip_ctx->content_start,
              strip_ctx->bottom - SEQ_STRIP_OFSBOTTOM);
@@ -1129,25 +1131,25 @@ static void draw_strip_offsets(TimelineDrawContext *timeline_ctx, StripDrawConte
     /* Outline. */
     immUniformColor3ubv(blend_col);
     imm_draw_box_wire_2d(pos,
-                         strip_ctx->content_start,
+                         strip_start,
                          strip_ctx->bottom - timeline_ctx->pixely,
                          strip_ctx->content_start,
                          strip_ctx->bottom - SEQ_STRIP_OFSBOTTOM);
   }
-  if (strip_ctx->right_handle < strip_ctx->content_end) {
+  if (strip_ctx->right_handle < strip_end) {
     immUniformColor4ubv(col);
     immRectf(pos,
-             strip_ctx->content_end,
+             strip_ctx->right_handle,
              strip_ctx->top + timeline_ctx->pixely,
-             strip_ctx->content_end,
+             strip_end,
              strip_ctx->top + SEQ_STRIP_OFSBOTTOM);
 
     /* Outline. */
     immUniformColor3ubv(blend_col);
     imm_draw_box_wire_2d(pos,
-                         strip_ctx->content_end,
+                         strip_ctx->right_handle,
                          strip_ctx->top + timeline_ctx->pixely,
-                         strip_ctx->content_end,
+                         strip_end,
                          strip_ctx->top + SEQ_STRIP_OFSBOTTOM);
   }
   GPU_blend(GPU_BLEND_NONE);
@@ -1657,9 +1659,50 @@ static void draw_seq_strips(TimelineDrawContext *timeline_ctx)
   for (Sequence *seq : visible_strips_ordered_get(timeline_ctx)) {
     StripDrawContext strip_ctx = strip_draw_context_get(timeline_ctx, seq);
     draw_seq_strip(timeline_ctx, &strip_ctx);
+
+    /* When active strip is an effect, highlight its inputs. */
+    if (SEQ_effect_get_num_inputs(last_seq->type) > 0) {
+      draw_effect_inputs_highlight(scene, last_seq);
+    }
+    /* When active is a Multi-cam strip, highlight its source channel. */
+    else if (last_seq->type == SEQ_TYPE_MULTICAM) {
+      int channel = last_seq->multicam_source;
+      if (channel != 0) {
+        GPU_blend(GPU_BLEND_ALPHA);
+        uint pos = GPU_vertformat_attr_add(
+            immVertexFormat(), "pos", GPU_COMP_F32, 2, GPU_FETCH_FLOAT);
+        immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+        immUniformColor4ub(255, 255, 255, 48);
+        immRectf(pos, v2d->cur.xmin, channel, v2d->cur.xmax, channel + 1);
+
+        immUnbindProgram();
+        GPU_blend(GPU_BLEND_NONE);
+      }
+    }
   }
 
-  UI_view2d_text_cache_draw(timeline_ctx->region);
+  /* Draw highlight if "solo preview" is used. */
+  if (ED_sequencer_special_preview_get()) {
+    const Sequence *seq = ED_sequencer_special_preview_get();
+    GPU_blend(GPU_BLEND_ALPHA);
+
+    uint pos = GPU_vertformat_attr_add(immVertexFormat(), "pos", GPU_COMP_F32, 2, GPU_FETCH_FLOAT);
+    immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
+
+    immUniformColor4ub(255, 255, 255, 48);
+    immRectf(pos,
+             SEQ_time_left_handle_frame_get(scene, seq),
+             seq->machine + SEQ_STRIP_OFSBOTTOM,
+             SEQ_time_right_handle_frame_get(scene, seq),
+             seq->machine + SEQ_STRIP_OFSTOP);
+
+    immUnbindProgram();
+
+    GPU_blend(GPU_BLEND_NONE);
+  }
+
+  UI_view2d_text_cache_draw(region);
 }
 
 static void draw_timeline_sfra_efra(TimelineDrawContext *ctx)
